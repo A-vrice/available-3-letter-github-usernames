@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import concurrent.futures as futures
+import itertools
 import os
+import string
 import sys
 import time
 from pathlib import Path
@@ -26,10 +28,45 @@ def normalize_names(lines):
             out.append(name)
     return out
 
+def generate_names(length=3, prefix="", suffix="", chars=None):
+    chars = chars or (string.ascii_lowercase + string.digits)
+    middle_len = length - len(prefix) - len(suffix)
+    if middle_len < 0:
+        raise ValueError("prefix/suffix が length より長い")
+    if middle_len == 0:
+        return [prefix + suffix]
+    return [
+        prefix + "".join(p) + suffix
+        for p in itertools.product(chars, repeat=middle_len)
+    ]
+
+def resolve_input_names(args):
+    if args.gen:
+        names = generate_names(
+            length=args.length,
+            prefix=args.prefix,
+            suffix=args.suffix,
+            chars=args.chars,
+        )
+        if args.limit > 0:
+            names = names[:args.limit]
+        return normalize_names(names)
+
+    if args.input == "-":
+        return normalize_names(sys.stdin.readlines())
+
+    p = Path(args.input)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"{args.input} が見つからない。"
+            f" ファイルを置くか、--gen を使って生成すること。"
+        )
+    return normalize_names(p.read_text(encoding="utf-8").splitlines())
+
 def make_session(token=None):
     s = requests.Session()
     s.headers.update({
-        "User-Agent": "github-username-checker/2.0",
+        "User-Agent": "github-username-checker/3.0",
         "Accept": "application/vnd.github+json",
     })
     if token:
@@ -69,19 +106,16 @@ def check_one(username, token=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RET
                 status, reason = check_via_api(session, username, timeout)
                 if status != "unknown":
                     return username, status, reason
-                if token:
-                    last_reason = reason
-                else:
-                    status, reason = check_via_web(session, username, timeout)
-                    if status != "unknown":
-                        return username, status, reason
-                    last_reason = reason
+                last_reason = reason
+                status, reason = check_via_web(session, username, timeout)
+                if status != "unknown":
+                    return username, status, reason
+                last_reason = reason
             else:
                 status, reason = check_via_web(session, username, timeout)
                 if status != "unknown":
                     return username, status, reason
                 last_reason = reason
-
         except requests.RequestException as e:
             last_reason = e.__class__.__name__
 
@@ -105,22 +139,24 @@ def write_report(path, rows):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Check GitHub username availability.")
-    p.add_argument("--input", "-i", default="-", help="Input file, or - for stdin")
+    p.add_argument("--input", "-i", default="usernames.txt", help="Input file, or - for stdin")
     p.add_argument("--out-dir", "-o", default="out", help="Output directory")
     p.add_argument("--workers", "-w", type=int, default=DEFAULT_WORKERS, help="Concurrent workers")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds")
     p.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries per username")
     p.add_argument("--prefer-web", action="store_true", help="Prefer website check over API")
-    p.add_argument("--token", default=os.getenv("GITHUB_TOKEN", ""), help="GitHub token, default from GITHUB_TOKEN")
+    p.add_argument("--token", default=os.getenv("GITHUB_TOKEN", ""), help="GitHub token")
+    p.add_argument("--gen", action="store_true", help="Generate usernames instead of reading file")
+    p.add_argument("--length", type=int, default=3, help="Generated username length")
+    p.add_argument("--prefix", default="", help="Fixed prefix for generation")
+    p.add_argument("--suffix", default="", help="Fixed suffix for generation")
+    p.add_argument("--chars", default=string.ascii_lowercase, help="Characters to use for generation")
+    p.add_argument("--limit", type=int, default=0, help="Limit generated usernames, 0=all")
     return p.parse_args()
 
 def main():
     args = parse_args()
-
-    if args.input == "-":
-        names = normalize_names(sys.stdin.readlines())
-    else:
-        names = normalize_names(Path(args.input).read_text(encoding="utf-8").splitlines())
+    names = resolve_input_names(args)
 
     token = args.token.strip() or None
     prefer_api = not args.prefer_web
