@@ -36,7 +36,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python github_username_checker.py \
-            --input usernames.txt \
+            --gen \
+            --length 3 \
             --out-dir out \
             --workers 4 \
             --timeout 10 \
