@@ -1,0 +1,61 @@
+name: update-github-usernames
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-github-usernames
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python github_username_checker.py \
+            --input usernames.txt \
+            --out-dir out \
+            --workers 4 \
+            --timeout 10 \
+            --retries 3
+
+      - name: Update latest symlink-like copies
+        run: |
+          cp out/available.txt available.txt
+          cp out/taken.txt taken.txt
+          cp out/unknown.txt unknown.txt
+          cp out/report.csv report.csv
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add out/ available.txt taken.txt unknown.txt report.csv
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: refresh username availability"
+
+      - name: Push changes
+        run: git push
