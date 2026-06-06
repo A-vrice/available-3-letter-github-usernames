@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
+"""
+GitHub Username Availability Checker
+- Supports a-z, 0-9, hyphen (with GitHub username validation)
+- Rate-limit aware: sequential by default, header monitoring, backoff
+- Uses GITHUB_TOKEN from environment if available
+"""
+
 import argparse
 import concurrent.futures as futures
 import itertools
 import os
+import re
 import string
 import sys
 import time
@@ -11,10 +19,19 @@ from pathlib import Path
 import requests
 
 DEFAULT_TIMEOUT = 10
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 1
 DEFAULT_RETRIES = 3
+MAX_USERNAME_LEN = 39
 BASE_URL = "https://github.com/{}"
 API_URL = "https://api.github.com/users/{}"
+
+# GitHub username rules: alphanumeric + hyphen, no leading/trailing hyphen, no consecutive hyphens, max 39 chars
+GITHUB_USERNAME_RE = re.compile(r"^(?=.{1,39}$)(?!-)(?!.*--)[a-zA-Z0-9-]+(?<!-)$")
+
+
+def is_valid_github_username(name: str) -> bool:
+    return bool(GITHUB_USERNAME_RE.fullmatch(name))
+
 
 def normalize_names(lines):
     out = []
@@ -28,26 +45,29 @@ def normalize_names(lines):
             out.append(name)
     return out
 
-def generate_names(length=3, prefix="", suffix="", chars=None):
-    chars = chars or (string.ascii_lowercase + string.digits)
+
+def generate_names(length=3, prefix="", suffix="", chars=None, allow_hyphen=True):
+    base = chars or (string.ascii_lowercase + string.digits)
+    if allow_hyphen:
+        base += "-"
     middle_len = length - len(prefix) - len(suffix)
     if middle_len < 0:
-        raise ValueError("prefix/suffix が length より長い")
-    if middle_len == 0:
-        return [prefix + suffix]
-    return [
-        prefix + "".join(p) + suffix
-        for p in itertools.product(chars, repeat=middle_len)
-    ]
+        return
+    for parts in itertools.product(base, repeat=middle_len):
+        name = prefix + "".join(parts) + suffix
+        if is_valid_github_username(name):
+            yield name
+
 
 def resolve_input_names(args):
     if args.gen:
-        names = generate_names(
+        names = list(generate_names(
             length=args.length,
             prefix=args.prefix,
             suffix=args.suffix,
             chars=args.chars,
-        )
+            allow_hyphen=args.allow_hyphen,
+        ))
         if args.limit > 0:
             names = names[:args.limit]
         return normalize_names(names)
@@ -58,10 +78,10 @@ def resolve_input_names(args):
     p = Path(args.input)
     if not p.exists():
         raise FileNotFoundError(
-            f"{args.input} が見つからない。"
-            f" ファイルを置くか、--gen を使って生成すること。"
+            f"{args.input} not found. Place the file or use --gen to generate candidates."
         )
     return normalize_names(p.read_text(encoding="utf-8").splitlines())
+
 
 def make_session(token=None):
     s = requests.Session()
@@ -73,8 +93,25 @@ def make_session(token=None):
         s.headers["Authorization"] = f"Bearer {token}"
     return s
 
+
+def _sleep_for_rate_limit(response):
+    """Inspect headers and sleep if we are near or at the limit."""
+    remaining = response.headers.get("x-ratelimit-remaining")
+    reset_ts = response.headers.get("x-ratelimit-reset")
+    retry_after = response.headers.get("retry-after")
+
+    if retry_after:
+        time.sleep(int(retry_after))
+        return
+
+    if remaining is not None and int(remaining) <= 1 and reset_ts:
+        sleep_sec = max(1, int(reset_ts) - int(time.time()) + 1)
+        time.sleep(min(sleep_sec, 60))
+
+
 def check_via_api(session, username, timeout):
     r = session.get(API_URL.format(username), timeout=timeout)
+    _sleep_for_rate_limit(r)
     if r.status_code == 404:
         return "available", "api_404"
     if r.status_code == 200:
@@ -84,6 +121,7 @@ def check_via_api(session, username, timeout):
     if 500 <= r.status_code < 600:
         return "unknown", f"api_{r.status_code}"
     return "unknown", f"api_{r.status_code}"
+
 
 def check_via_web(session, username, timeout):
     r = session.get(BASE_URL.format(username), timeout=timeout, allow_redirects=True)
@@ -97,16 +135,18 @@ def check_via_web(session, username, timeout):
         return "unknown", f"web_{r.status_code}"
     return "unknown", f"web_{r.status_code}"
 
+
 def check_one(username, token=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES, prefer_api=True):
     session = make_session(token)
     last_reason = "unknown"
     for attempt in range(retries):
         try:
-            if prefer_api:
+            if prefer_api and token:
                 status, reason = check_via_api(session, username, timeout)
                 if status != "unknown":
                     return username, status, reason
                 last_reason = reason
+                # fallback to web
                 status, reason = check_via_web(session, username, timeout)
                 if status != "unknown":
                     return username, status, reason
@@ -124,35 +164,40 @@ def check_one(username, token=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RET
 
     return username, "unknown", last_reason
 
+
 def write_list(path, items):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as f:
+    with path.open("w", encoding="utf-8", newline="\\n") as f:
         for item in items:
-            f.write(f"{item}\n")
+            f.write(f"{item}\\n")
+
 
 def write_report(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write("username,status,reason\n")
+    with path.open("w", encoding="utf-8", newline="\\n") as f:
+        f.write("username,status,reason\\n")
         for username, status, reason in rows:
-            f.write(f"{username},{status},{reason}\n")
+            f.write(f"{username},{status},{reason}\\n")
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Check GitHub username availability.")
     p.add_argument("--input", "-i", default="usernames.txt", help="Input file, or - for stdin")
     p.add_argument("--out-dir", "-o", default="out", help="Output directory")
-    p.add_argument("--workers", "-w", type=int, default=DEFAULT_WORKERS, help="Concurrent workers")
+    p.add_argument("--workers", "-w", type=int, default=DEFAULT_WORKERS, help="Concurrent workers (default 1 for rate limit safety)")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds")
     p.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries per username")
     p.add_argument("--prefer-web", action="store_true", help="Prefer website check over API")
-    p.add_argument("--token", default=os.getenv("GITHUB_TOKEN", ""), help="GitHub token")
+    p.add_argument("--token", default=os.getenv("GITHUB_TOKEN", ""), help="GitHub token (default from GITHUB_TOKEN env)")
     p.add_argument("--gen", action="store_true", help="Generate usernames instead of reading file")
     p.add_argument("--length", type=int, default=3, help="Generated username length")
     p.add_argument("--prefix", default="", help="Fixed prefix for generation")
     p.add_argument("--suffix", default="", help="Fixed suffix for generation")
-    p.add_argument("--chars", default=string.ascii_lowercase, help="Characters to use for generation")
+    p.add_argument("--chars", default=string.ascii_lowercase + string.digits, help="Characters to use for generation")
+    p.add_argument("--allow-hyphen", action="store_true", help="Allow hyphen in generated names")
     p.add_argument("--limit", type=int, default=0, help="Limit generated usernames, 0=all")
     return p.parse_args()
+
 
 def main():
     args = parse_args()
@@ -206,6 +251,7 @@ def main():
         f"checked={len(rows)} available={len(available)} taken={len(taken)} unknown={len(unknown)}",
         file=sys.stderr,
     )
+
 
 if __name__ == "__main__":
     main()
