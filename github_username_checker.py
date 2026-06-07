@@ -167,18 +167,16 @@ def check_one(username, token=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RET
 
 def write_list(path, items):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\\n") as f:
+    with path.open("w", encoding="utf-8", newline="\n") as f:
         for item in items:
-            f.write(f"{item}\\n")
-
+            f.write(f"{item}\n")
 
 def write_report(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\\n") as f:
-        f.write("username,status,reason\\n")
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("username,status,reason\n")
         for username, status, reason in rows:
-            f.write(f"{username},{status},{reason}\\n")
-
+            f.write(f"{username},{status},{reason}\n")
 
 def parse_args():
     p = argparse.ArgumentParser(description="Check GitHub username availability.")
