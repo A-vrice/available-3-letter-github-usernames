@@ -13,13 +13,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 1440
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        prefix:
+          - a
+          - b
+          - c
+          - d
+          - e
+          - f
+          - g
+          - h
+          - i
+          - j
+          - k
+          - l
+          - m
+          - n
+          - o
+          - p
+          - q
+          - r
+          - s
+          - t
+          - u
+          - v
+          - w
+          - x
+          - y
+          - z
+          - 0
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,11 +77,49 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
         run: |
           python github_username_checker.py \
-          --gen --length 3 --allow-hyphen \
-          --out-dir out \
-          --workers 4 --timeout 10 --retries 3
+            --gen \
+            --length 3 \
+            --prefix "${{ matrix.prefix }}" \
+            --allow-hyphen \
+            --out-dir "out/${{ matrix.prefix }}" \
+            --workers 1 \
+            --timeout 10 \
+            --retries 3
 
-      - name: Update latest symlink-like copies
+      - name: Upload shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.prefix }}
+          path: out/${{ matrix.prefix }}
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge outputs
+        run: |
+          mkdir -p out
+          find shards -name available.txt -type f -exec cat {} \; | sort -u > out/available.txt
+          find shards -name taken.txt -type f -exec cat {} \; | sort -u > out/taken.txt
+          find shards -name unknown.txt -type f -exec cat {} \; | sort -u > out/unknown.txt
+          {
+            echo "username,status,reason"
+            find shards -name report.csv -type f -exec tail -n +2 {} \;
+          } | sort -u > out/report.csv
+
+      - name: Update latest copies
         run: |
           cp out/available.txt available.txt
           cp out/taken.txt taken.txt
